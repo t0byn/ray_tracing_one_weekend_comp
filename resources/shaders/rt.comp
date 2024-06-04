@@ -1,0 +1,394 @@
+#version 430
+
+// work group size
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// interval
+const float infinity = 1. / 0.;
+struct Interval
+{
+    float min;
+    float max;
+};
+
+// material type
+#define MATERIAL_TYPE_LAMBERTIAN 1
+#define MATERIAL_TYPE_METAL 2
+#define MATERIAL_TYPE_DIELECTRIC 3
+
+struct MaterialHandle
+{
+    int type;
+    int index;
+};
+
+struct Lambertian
+{
+    vec3 albedo;
+};
+
+struct Metal
+{
+    vec3 albedo;
+    float fuzz;
+};
+
+struct Dielectric
+{
+    vec3 albedo;
+    float refractive_index;
+};
+
+// ray
+struct Ray
+{
+    vec3 origin;
+    vec3 dir;
+};
+
+struct RayHitRecord
+{
+    vec3 p;
+    vec3 normal;
+    float t;
+    bool front_face;
+    MaterialHandle material;
+};
+
+// sphere
+struct Sphere
+{
+    vec3 center;
+    float radius;
+    MaterialHandle material;
+};
+
+// camera
+struct RtCameraCompute
+{
+    vec3 lookfrom;
+    vec3 pixel_00;
+    vec3 pixel_delta_u;
+    vec3 pixel_delta_v;
+    vec3 defocus_disk_u;
+    vec3 defocus_disk_v;
+    int max_depth;
+    int samples_per_pixel;
+};
+
+// rendering target image
+layout(binding = 0, rgba8) restrict uniform image2D target;
+
+// camera
+uniform RtCameraCompute camera;
+
+// how many time this pixel being sampled
+uniform int sample_count;
+
+// seed 
+layout(std430, binding = 1) restrict buffer SeedBuff
+{
+    uint seed_buf[];
+};
+
+// metarial 
+layout(std430, binding = 2) restrict readonly buffer LambertianBuffer
+{
+    int lambertian_count;
+    Lambertian lambertian_buf[];
+};
+layout(std430, binding = 3) restrict readonly buffer MetalBuffer
+{
+    int metal_count;
+    Metal metal_buf[];
+};
+layout(std430, binding = 4) restrict readonly buffer DielectricBuffer
+{
+    int dielectric_count;
+    Dielectric dielectric_buf[];
+};
+
+// sphere
+layout(std430, binding = 5) restrict readonly buffer SphereBuffer
+{
+    int sphere_count;
+    Sphere sphere_buf[];
+};
+
+// color accumulation
+layout(std430, binding = 6) restrict buffer ColorAccumulationBuffer
+{
+    vec3 color_accumulation_buf[];
+};
+
+const uint global_invocation_index = 
+        gl_GlobalInvocationID.z * gl_WorkGroupSize.y * gl_NumWorkGroups.y * gl_WorkGroupSize.x * gl_NumWorkGroups.x +
+        gl_GlobalInvocationID.y * gl_WorkGroupSize.x * gl_NumWorkGroups.x + gl_GlobalInvocationID.x;
+// rng
+// https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
+uint rand_pcg()
+{
+    uint state = seed_buf[global_invocation_index] + sample_count;
+    seed_buf[global_invocation_index] = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float random_float()
+{
+    uint r = rand_pcg();
+    return float(r) / 0xFFFFFFFFU;
+}
+
+float random_float(float min, float max)
+{
+    return min + (max - min) * random_float();
+}
+
+vec3 random_unit_vec3()
+{
+    vec3 v = vec3(random_float(-1.0, 1.0), random_float(-1.0, 1.0), random_float(-1.0, 1.0));
+    return normalize(tan(v));
+}
+
+vec2 random_unit_vec2()
+{
+    vec2 v = vec2(random_float(-1.0, 1.0), random_float(-1.0, 1.0));
+    return normalize(tan(v));
+}
+
+// ray
+vec3 ray_at(in Ray ray, in float t)
+{
+    return ray.origin + (t * ray.dir);
+}
+
+#define PRECISION 0.000001 
+bool vec3_near_zero(in vec3 v)
+{
+    float s = 1e-8;
+    return (abs(v.x) < s) && (abs(v.y) < s) && (abs(v.z) < s);
+}
+
+// material
+vec3 material_reflect(in vec3 incident, in vec3 normal)
+{
+    vec3 reflected = (incident - 2 * dot(incident, normal) * normal);
+    return reflected;
+}
+
+vec3 material_refract(in vec3 unit_incident, in vec3 normal, in float eta_over_eta_prime)
+{
+    float cos_theta = min(dot(-unit_incident, normal), 1.0);
+    vec3 perpendicular = 
+        eta_over_eta_prime * (unit_incident + cos_theta * normal);
+    vec3 parallel = 
+        -sqrt(1 - (perpendicular.x * perpendicular.x + perpendicular.y * perpendicular.y + perpendicular.z * perpendicular.z)) * normal;
+    vec3 refracted = perpendicular + parallel;
+    return refracted;
+}
+
+bool scatter_lambertian(in Ray incident_ray, in RayHitRecord rec, out vec3 attenuation, out Ray scatterred_ray)
+{
+    Lambertian lambertian = lambertian_buf[rec.material.index];
+    vec3 unit_vector = random_unit_vec3();
+    vec3 scatter_direction = rec.normal + unit_vector;
+    if (vec3_near_zero(scatter_direction))
+        scatter_direction = rec.normal;
+
+    scatterred_ray.origin = rec.p;
+    scatterred_ray.dir = scatter_direction;
+    attenuation = lambertian.albedo;
+    return true;
+}
+
+bool scatter_metal(in Ray incident_ray, in RayHitRecord rec, out vec3 attenuation, out Ray scatterred_ray)
+{
+    Metal metal = metal_buf[rec.material.index];
+    vec3 reflect_direction = material_reflect(incident_ray.dir, rec.normal);
+    reflect_direction = reflect_direction + (metal.fuzz * random_unit_vec3());
+
+    scatterred_ray.origin = rec.p;
+    scatterred_ray.dir = reflect_direction;
+    attenuation = metal.albedo;
+    return (dot(reflect_direction, rec.normal) > 0);
+}
+
+float reflectance(float cosine, float refraction_index)
+{
+    // Christophe Schlick's approximation for reflectance
+    float r0 = (1 - refraction_index) / (1 + refraction_index);
+    r0 = r0*r0;
+    return r0 + (1 - r0) * pow((1 - cosine), 5);
+}
+
+bool scatter_dielectric(in Ray incident_ray, in RayHitRecord rec, out vec3 attenuation, out Ray scatterred_ray)
+{
+    Dielectric dielectric = dielectric_buf[rec.material.index];
+    float ri = dielectric.refractive_index;
+    if (rec.front_face)
+    {
+        ri = (1.0 / dielectric.refractive_index);
+    }
+    vec3 unit_incident = normalize(incident_ray.dir);
+    float cos_theta = min(dot(-unit_incident, rec.normal), 1.0);
+    float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+    vec3 scatter_direction;
+    bool cannot_refract = (ri * sin_theta > 1.0);
+    if (cannot_refract || reflectance(cos_theta, ri) > random_float())
+    {
+        scatter_direction = material_reflect(unit_incident, rec.normal);
+    }
+    else
+    {
+        scatter_direction = material_refract(unit_incident, rec.normal, ri);
+    }
+
+    scatterred_ray.origin = rec.p;
+    scatterred_ray.dir = scatter_direction;
+    attenuation = dielectric.albedo;
+    return true;
+}
+
+bool scatter(in Ray incident_ray, in RayHitRecord rec, out vec3 attenuation, out Ray scatterred_ray)
+{
+    switch(rec.material.type)
+    {
+    case MATERIAL_TYPE_LAMBERTIAN:
+        return scatter_lambertian(incident_ray, rec, attenuation, scatterred_ray);
+    case MATERIAL_TYPE_METAL:
+        return scatter_metal(incident_ray, rec, attenuation, scatterred_ray);
+    case MATERIAL_TYPE_DIELECTRIC:
+        return scatter_dielectric(incident_ray, rec, attenuation, scatterred_ray);
+    }
+    return false;
+}
+
+// scene
+bool ray_hit_sphere(in Sphere sphere, in Ray ray, in Interval ray_t, out RayHitRecord rec)
+{
+    vec3 oc = sphere.center - ray.origin;
+    float a = (ray.dir.x * ray.dir.x) + (ray.dir.y * ray.dir.y) + (ray.dir.z * ray.dir.z);
+    float h = dot(ray.dir, oc);
+    float c = ((oc.x * oc.x) + (oc.y * oc.y) + (oc.z * oc.z)) - (sphere.radius * sphere.radius);
+    float discriminant = (h * h) - (a * c);
+
+    if (discriminant < 0) return false;
+
+    float sqrt_d = sqrt(discriminant);
+    // find the nearest root that lies in the acceptable range
+    float root = (h - sqrt_d) / a;
+    if (!(ray_t.min < root && root < ray_t.max))
+    {
+        root = (h + sqrt_d) / a;
+        if (!(ray_t.min < root && root < ray_t.max)) return false;
+    }
+
+    rec.t = root;
+    rec.p = ray_at(ray, root);
+    vec3 outward_normal = (rec.p - sphere.center) / sphere.radius;
+    rec.front_face = (dot(ray.dir, outward_normal) <= 0);
+    if (rec.front_face) rec.normal = outward_normal;
+    else rec.normal = -outward_normal;
+    rec.material = sphere.material;
+
+    return true;
+}
+
+bool ray_hit_scene(in Ray ray, in Interval ray_t, out RayHitRecord rec)
+{
+    bool hit = false;
+    float closest_hit_root = ray_t.max;
+    for (int i = 0; i < sphere_count; i++)
+    {
+        const Sphere sphere = sphere_buf[i];
+        if (ray_hit_sphere(sphere, ray, Interval(ray_t.min, closest_hit_root), rec))
+        {
+            hit = true;
+            closest_hit_root = rec.t;
+        }
+    }
+    return hit;
+}
+
+vec3 raycast(in Ray ray)
+{
+    Ray send_ray = ray;
+    vec3 color = vec3(1.0, 1.0, 1.0);
+    for (int depth = 0; depth <= camera.max_depth; depth++)
+    {
+        if (depth == camera.max_depth)
+        {
+            color *= vec3(0.0, 0.0, 0.0);
+            break;
+        }
+
+        RayHitRecord rec;
+        if (ray_hit_scene(send_ray, Interval(0.001, +infinity), rec))
+        {
+            vec3 attenuation;
+            Ray scatterred_ray;
+            if (scatter(send_ray, rec, attenuation, scatterred_ray))
+            {
+                color *= attenuation;
+                send_ray = scatterred_ray;
+            }
+            else
+            {
+                color *= vec3(0.0, 0.0, 0.0);
+                break;
+            }
+        }
+        else
+        {
+            vec3 white = vec3(1.0, 1.0, 1.0);
+            vec3 blue = vec3(0.5, 0.7, 1.0);
+            vec3 unit_dir = normalize(send_ray.dir);
+            float a = 0.5 * (unit_dir.y + 1.0);
+            vec3 sky_color = (1 - a) * white + a * blue;
+            color *= sky_color;
+            break;
+        }
+    }
+    return color;
+}
+
+// gamma correction with gamma = 2
+vec3 linear_to_gamma(in vec3 color)
+{
+    if (color.x > 0) color.x = sqrt(color.x);
+    if (color.y > 0) color.y = sqrt(color.y);
+    if (color.z > 0) color.z = sqrt(color.z);
+    clamp(color.x, 0.0, 0.999);
+    clamp(color.y, 0.0, 0.999);
+    clamp(color.z, 0.0, 0.999);
+    return color;
+}
+
+void main()
+{
+    // get ray
+    vec2 sample_offset = vec2(random_float() - 0.5, random_float() - 0.5);
+    vec3 pixel_sample_point = camera.pixel_00
+        + ((gl_GlobalInvocationID.x + sample_offset.x) * camera.pixel_delta_u)
+        + ((gl_GlobalInvocationID.y + sample_offset.y) * camera.pixel_delta_v);
+    vec2 origin_offset = vec2(random_float() - 0.5, random_float() - 0.5);
+    vec3 ray_origin = camera.lookfrom 
+        + (origin_offset.x * camera.defocus_disk_u)
+        + (origin_offset.y * camera.defocus_disk_v);
+    vec3 ray_direction = pixel_sample_point - ray_origin;
+
+    Ray ray;
+    ray.origin = ray_origin;
+    ray.dir = ray_direction;
+
+    vec3 color = raycast(ray);
+
+    color_accumulation_buf[global_invocation_index] += color;
+
+    vec3 pixel_color = color_accumulation_buf[global_invocation_index] / sample_count;
+    pixel_color = linear_to_gamma(pixel_color);
+    
+    imageStore(target, ivec2(gl_GlobalInvocationID.xy), vec4(pixel_color, 1.0));
+}
