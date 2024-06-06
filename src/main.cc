@@ -222,10 +222,12 @@ int main(void)
 
     UnloadTexture(target);
 
+    rlUnloadShaderBuffer(ssbo_color_accumulation);
     rlUnloadShaderBuffer(ssbo_sphere);
     rlUnloadShaderBuffer(ssbo_dielectric);
     rlUnloadShaderBuffer(ssbo_metal);
     rlUnloadShaderBuffer(ssbo_lambertian);
+    rlUnloadShaderBuffer(ssbo_seed);
 
     rlUnloadShaderProgram(rt_program);
 
