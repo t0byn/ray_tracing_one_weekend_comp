@@ -89,6 +89,11 @@ void init_simple_test_scene()
     add_sphere(Point3{1.0f, 0.0f, -1.0f}, 0.5f, mat);
 }
 
+#define SEED_BUFFER_SIZE (sizeof(unsigned int)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT)
+#define COLOR_ACCUMULATION_BUFFER_SIZE (4*sizeof(float)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT)
+unsigned int seed_buffer[SEED_BUFFER_SIZE];
+float color_accumulation_buffer[COLOR_ACCUMULATION_BUFFER_SIZE];
+
 int main(void)
 {
     InitWindow(window_width, window_height, "rt demo");
@@ -100,15 +105,12 @@ int main(void)
     unsigned int rt_shader = rlCompileShader(rt_shader_text, RL_COMPUTE_SHADER);
     unsigned int rt_program = rlLoadComputeShaderProgram(rt_shader);
 
-    unsigned int ssbo_seed = rlLoadShaderBuffer(sizeof(unsigned int)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT, NULL, RL_DYNAMIC_COPY);
+    unsigned int ssbo_seed = rlLoadShaderBuffer(SEED_BUFFER_SIZE, NULL, RL_DYNAMIC_COPY);
     unsigned int ssbo_lambertian = rlLoadShaderBuffer(sizeof(LambertianSSBO), NULL, RL_DYNAMIC_COPY);
     unsigned int ssbo_metal = rlLoadShaderBuffer(sizeof(MetalSSBO), NULL, RL_DYNAMIC_COPY);
     unsigned int ssbo_dielectric = rlLoadShaderBuffer(sizeof(DielectricSSBO), NULL, RL_DYNAMIC_COPY);
     unsigned int ssbo_sphere = rlLoadShaderBuffer(sizeof(SphereSSBO), NULL, RL_DYNAMIC_COPY);
-    unsigned int ssbo_color_accumulation = rlLoadShaderBuffer(4*sizeof(float)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT, NULL, RL_DYNAMIC_COPY);
-
-    unsigned int* seed_buffer = (unsigned int*)malloc(sizeof(unsigned int)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT);
-    float* color_accumulation_buffer = (float*)malloc(4*sizeof(float)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT);
+    unsigned int ssbo_color_accumulation = rlLoadShaderBuffer(COLOR_ACCUMULATION_BUFFER_SIZE, NULL, RL_DYNAMIC_COPY);
 
     // camera
     RtCamera rt_camera;
@@ -138,7 +140,7 @@ int main(void)
         }
     }
 
-    memset(color_accumulation_buffer, 0, 4*sizeof(float)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT);
+    memset(color_accumulation_buffer, 0, COLOR_ACCUMULATION_BUFFER_SIZE);
 
     RtCameraCompute rt_camera_comp = rt_camera.get_camera_compute();
 
@@ -168,12 +170,12 @@ int main(void)
             rlSetUniform(rlGetLocationUniform(rt_program, "camera.max_depth"), &rt_camera_comp.max_depth, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(rlGetLocationUniform(rt_program, "camera.samples_per_pixel"), &rt_camera_comp.samples_per_pixel, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(rlGetLocationUniform(rt_program, "sample_count"), &sample_count, RL_SHADER_UNIFORM_INT, 1);
-            rlUpdateShaderBuffer(ssbo_seed, seed_buffer, sizeof(unsigned int)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT, 0);
+            rlUpdateShaderBuffer(ssbo_seed, seed_buffer, SEED_BUFFER_SIZE, 0);
             rlUpdateShaderBuffer(ssbo_lambertian, &lambertian_buffer, sizeof(LambertianSSBO), 0);
             rlUpdateShaderBuffer(ssbo_metal, &metal_buffer, sizeof(MetalSSBO), 0);
             rlUpdateShaderBuffer(ssbo_dielectric, &dielectric_buffer, sizeof(DielectricSSBO), 0);
             rlUpdateShaderBuffer(ssbo_sphere, &sphere_buffer, sizeof(SphereSSBO), 0);
-            rlUpdateShaderBuffer(ssbo_color_accumulation, color_accumulation_buffer, sizeof(4*sizeof(float)*MAX_IMAGE_WIDTH*MAX_IMAGE_HEIGHT), 0);
+            rlUpdateShaderBuffer(ssbo_color_accumulation, color_accumulation_buffer, COLOR_ACCUMULATION_BUFFER_SIZE, 0);
             rlBindShaderBuffer(ssbo_seed, 1);
             rlBindShaderBuffer(ssbo_lambertian, 2);
             rlBindShaderBuffer(ssbo_metal, 3);
