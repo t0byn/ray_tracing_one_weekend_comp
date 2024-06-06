@@ -41,25 +41,25 @@ struct DielectricMaterial
 struct LambertianSSBO
 {
     int count;
-    unsigned int padding_1;
-    unsigned int padding_2;
-    unsigned int padding_3;
+    unsigned int _padding_1;
+    unsigned int _padding_2;
+    unsigned int _padding_3;
     LambertianMaterial materials[MAX_LAMBERTIAN_MATERIAL_NUMBER];
 };
 struct MetalSSBO
 {
     int count;
-    unsigned int padding_1;
-    unsigned int padding_2;
-    unsigned int padding_3;
+    unsigned int _padding_1;
+    unsigned int _padding_2;
+    unsigned int _padding_3;
     MetalMaterial materials[MAX_METAL_MATERIAL_NUMBER];
 };
 struct DielectricSSBO
 {
     int count;
-    unsigned int padding_1;
-    unsigned int padding_2;
-    unsigned int padding_3;
+    unsigned int _padding_1;
+    unsigned int _padding_2;
+    unsigned int _padding_3;
     DielectricMaterial materials[MAX_DIELECTRIC_MATERIAL_NUMBER];
 };
 
